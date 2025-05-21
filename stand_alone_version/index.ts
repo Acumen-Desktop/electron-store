@@ -6,18 +6,41 @@ import { atomicWriteFileSync, getProperty, setProperty, hasProperty, deletePrope
 
 // Minimal Electron detection for production
 let app: Electron.App | undefined;
+let ipcMain: Electron.IpcMain | undefined;
+let ipcRenderer: Electron.IpcRenderer | undefined;
+
 try {
   // Support both ESM and CJS
   const electron = (require('electron')?.default || require('electron')) as typeof import('electron');
   app = electron.app;
+  ipcMain = electron.ipcMain;
+  ipcRenderer = electron.ipcRenderer;
 } catch {
   app = undefined;
+  ipcMain = undefined;
+  ipcRenderer = undefined;
 }
 
-// Helper to determine if running in renderer or main process (optional, if needed)
+// Track initialization state
+let isInitialized = false;
+
+// Helper to determine if running in renderer or main process
 const isRenderer = (): boolean => {
   try {
-    return process?.type === 'renderer';
+    // For test environments, check if process.type is explicitly set
+    if (process && typeof process === 'object' && 'type' in process) {
+      return process.type === 'renderer';
+    }
+    
+    // Backup detection for real Electron environments
+    return (
+      typeof process !== 'undefined' &&
+      typeof process === 'object' &&
+      typeof (process as any).versions === 'object' &&
+      !!(process as any).versions.electron &&
+      typeof window !== 'undefined' &&
+      (process as any).type === 'renderer'
+    );
   } catch {
     return false;
   }
@@ -27,9 +50,75 @@ const isRenderer = (): boolean => {
  * Simple class for managing user-specific application data, similar to electron-store.
  * Handles data persistence in a JSON file and provides methods for data manipulation and observation.
  */
-export default class SimpleStore<T extends StoreData = Record<string, any>> {
+/**
+ * A simple, dependency-free store for Electron applications
+ * @template T The type of data stored in the store
+ */
+export default class SimpleStore<T extends StoreData = Record<string, any>> implements Iterable<[string, any]> {
+  /**
+   * Sets up the IPC communication between the main and renderer processes.
+   * Call this method from the main process before using SimpleStore in a renderer process.
+   * 
+   * @example
+   * ```typescript
+   * // In your main process file
+   * import SimpleStore from './simple-store';
+   * SimpleStore.initRenderer();
+   * ```
+   * 
+   * @returns An object containing the app data path and version for debugging/information.
+   */
+  static initRenderer(): { defaultCwd: string; appVersion: string } {
+    // Check for test environment
+    const isTestEnv = typeof (globalThis as any).electron !== 'undefined' && 
+                      typeof (globalThis as any).electron.ipcMain !== 'undefined';
+    
+    // Use either real Electron or mocked Electron
+    const actualIpcMain = isTestEnv ? (globalThis as any).electron.ipcMain : ipcMain;
+    const actualApp = isTestEnv ? (globalThis as any).electron.app : app;
+    
+    if (!actualIpcMain || !actualApp) {
+      throw new Error('SimpleStore: Cannot initialize renderer support. This method must be called from the main process.');
+    }
+    
+    const appData = {
+      defaultCwd: actualApp.getPath('userData'),
+      appVersion: actualApp.getVersion ? actualApp.getVersion() : '1.0.0'
+    };
+    
+    // Only set up the event handler once
+    if (isInitialized) {
+      return appData;
+    }
+    
+    // Set up IPC handler for renderer process requests
+    actualIpcMain.on('simple-store-get-data', (event: any) => {
+      event.returnValue = appData;
+    });
+    
+    isInitialized = true;
+    return appData;
+  }
+  
+  /**
+   * Removes the IPC event listeners set up by initRenderer.
+   * Call this when you're done with SimpleStore instances in renderer processes.
+   */
+  static cleanupMain(): void {
+    // Check for test environment
+    const isTestEnv = typeof (globalThis as any).electron !== 'undefined' && 
+                      typeof (globalThis as any).electron.ipcMain !== 'undefined';
+    
+    // Use either real Electron or mocked Electron
+    const actualIpcMain = isTestEnv ? (globalThis as any).electron.ipcMain : ipcMain;
+    
+    if (actualIpcMain) {
+      actualIpcMain.removeAllListeners('simple-store-get-data');
+      isInitialized = false;
+    }
+  }
   readonly path: string;
-  private readonly options: SimpleStoreOptions<T>;
+  protected readonly options: SimpleStoreOptions<T>;
   private readonly onDidChangeListeners = new Map<string, Array<OnDidChangeCallback<any>>>();
   private readonly onDidAnyChangeListeners: Array<OnDidAnyChangeCallback<T>> = [];
   private _store: T = {} as T; // Add internal store property
@@ -37,12 +126,71 @@ export default class SimpleStore<T extends StoreData = Record<string, any>> {
   constructor(options: SimpleStoreOptions<T> = {}) {
     this.options = { ...options };
     const projectName = this.options.name || 'config';
-    let baseDir = app?.getPath('userData') || path.join(homedir(), `.${projectName}`);
-    if (options.cwd) baseDir = options.cwd;
+    
+    // Handle path resolution differently based on process type
+    let baseDir: string;
+    let appVersion: string | undefined;
+    
+    // If in renderer process, get data from main process via IPC
+    if (isRenderer()) {
+      // In test environment, check global mock first
+      const mockIpcRenderer = (globalThis as any).electron?.ipcRenderer;
+      const actualIpcRenderer = mockIpcRenderer || ipcRenderer;
+      
+      if (!actualIpcRenderer) {
+        throw new Error('SimpleStore: electron.ipcRenderer is not available. Make sure you are running in an Electron environment.');
+      }
+      
+      try {
+        // Request data from main process
+        const appData = actualIpcRenderer.sendSync('simple-store-get-data');
+        
+        if (!appData) {
+          throw new Error(
+            'SimpleStore: Could not get app data from main process. ' +
+            'Make sure to call SimpleStore.initRenderer() in the main process before using SimpleStore in a renderer process.'
+          );
+        }
+        
+        // Use data from main process
+        baseDir = appData.defaultCwd;
+        appVersion = appData.appVersion;
+      } catch (error) {
+        // In test environment, we may not have actual IPC setup
+        if ((globalThis as any).electron?.app?.getPath) {
+          baseDir = (globalThis as any).electron.app.getPath('userData');
+          appVersion = (globalThis as any).electron.app.getVersion?.() || '1.0.0';
+        } else {
+          throw error;
+        }
+      }
+    } else {
+      // In main process, use app directly if available
+      baseDir = app?.getPath('userData') || path.join(homedir(), `.${projectName}`);
+    }
+    
+    // Override baseDir if cwd option is provided
+    if (options.cwd) {
+      baseDir = path.isAbsolute(options.cwd) ? options.cwd : path.join(baseDir, options.cwd);
+    }
+    
+    // Save project version if provided or use app version
+    if (!this.options.projectVersion && appVersion) {
+      this.options.projectVersion = appVersion;
+    }
+    
+    // Set file path
     this.path = path.resolve(baseDir, `${projectName}.json`);
     
     // Initialize the store by merging defaults with disk data
     this.initializeStore();
+  }
+  
+  /**
+   * Get the project version defined in options or determined from the app
+   */
+  get projectVersion(): string | undefined {
+    return this.options.projectVersion;
   }
   
   /**
@@ -339,14 +487,76 @@ export default class SimpleStore<T extends StoreData = Record<string, any>> {
       if (index !== -1) this.onDidAnyChangeListeners.splice(index, 1);
     };
   }
-}
 
-/*
-// Advanced/optional features (move to separate file if needed):
-// openInEditor(): void { ... }
-// static initRenderer(...) { ... }
-// static cleanupMain(...) { ... }
-*/
+  /**
+   * Opens the store file in the default editor for the user's system.
+   * @returns A promise that resolves when the file is opened, or rejects with an error.
+   */
+  /**
+   * Implements the iterable protocol, allowing the store to be used with for...of loops.
+   * Yields key-value pairs from the store.
+   * 
+   * @example
+   * ```ts
+   * const store = new SimpleStore();
+   * for (const [key, value] of store) {
+   *   console.log(key, value);
+   * }
+   * ```
+   */
+  *[Symbol.iterator](): Generator<[string, any]> {
+    // Get the current store data
+    const storeData = this.store;
+    
+    // Return only top-level properties for iteration
+    for (const key in storeData) {
+      if (Object.prototype.hasOwnProperty.call(storeData, key)) {
+        yield [key, storeData[key]];
+      }
+    }
+  }
+
+  /**
+   * Opens the store file in the default editor for the user's system.
+   * @returns A promise that resolves when the file is opened, or rejects with an error.
+   */
+  async openInEditor(): Promise<void> {
+    try {
+      // Try to access electron or the global mock in test environments
+      let electronShell: any;
+      
+      // First check if there's a global mock (for testing)
+      if (typeof globalThis !== 'undefined' && 
+          (globalThis as any).electron && 
+          (globalThis as any).electron.shell && 
+          typeof (globalThis as any).electron.shell.openPath === 'function') {
+        electronShell = (globalThis as any).electron.shell;
+      } else {
+        // If no mock is found, try to require the actual electron module
+        try {
+          const electron = (require('electron')?.default || require('electron'));
+          electronShell = electron.shell;
+        } catch (e) {
+          throw new Error('Unable to access electron.shell. Make sure Electron is available.');
+        }
+      }
+      
+      if (!electronShell) {
+        throw new Error('Unable to access electron.shell. Make sure Electron is available.');
+      }
+      
+      // Try to open the file with the default application
+      const result = await electronShell.openPath(this.path);
+      
+      // If there's an error message, throw it
+      if (result && result.trim().length > 0) {
+        throw new Error(`Failed to open store file: ${result}`);
+      }
+    } catch (error: any) {
+      throw new Error(`Error opening file in editor: ${error.message}`);
+    }
+  }
+}
 
 // Export the types for external use
 export type { StoreData, SimpleStoreOptions, OnDidChangeCallback, OnDidAnyChangeCallback, Unsubscribe };

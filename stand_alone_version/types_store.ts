@@ -35,6 +35,12 @@ export interface SimpleStoreOptions<T extends StoreData = Record<string, any>> {
    * @default app.getPath('userData')
    */
   cwd?: string;
+  
+  /**
+   * Application or project version.
+   * If not specified, will use electron app.getVersion() when available.
+   */
+  projectVersion?: string;
 
   /**
    * Enable watching of the config file for external changes.

@@ -10,8 +10,10 @@ This is a simplified, dependency-free version of `electron-store`, designed to p
 -   Atomic file writes to prevent data corruption.
 -   Change watching: `onDidChange(key, callback)` and `onDidAnyChange(callback)`.
 -   Works in both main and renderer processes (`SimpleStore.initRenderer()` required for renderer usage).
--   Iterable via `for...of` loops.
--   `openInEditor()` method.
+-   **Iterable API**: Use with `for...of` loops or spread operator (`[...store]`).
+-   **Renderer Process Support**: Easy IPC communication setup via `SimpleStore.initRenderer()`.
+-   **Project Version Tracking**: Store app/project version information via `projectVersion` option.
+-   **Open in Editor**: `openInEditor()` method to open the store file in system's default editor.
 
 ## Excluded Features (for simplicity and no dependencies)
 
@@ -79,6 +81,7 @@ This project uses a clean, modern TypeScript workflow for all tests:
     interface MyAppSettings {
       theme?: string;
       notificationsEnabled?: boolean;
+      userPreferences?: Record<string, any>;
     }
 
     const store = new SimpleStore<MyAppSettings>({
@@ -86,7 +89,8 @@ This project uses a clean, modern TypeScript workflow for all tests:
         theme: 'light',
         notificationsEnabled: true
       },
-      configName: 'app-preferences' // Optional: custom file name
+      name: 'app-preferences', // Optional: custom file name
+      projectVersion: '1.0.0'  // Optional: track your app version
     });
 
     // Set a value
@@ -102,6 +106,50 @@ This project uses a clean, modern TypeScript workflow for all tests:
 
     // To stop watching:
     // unsubscribeThemeWatcher();
+    ```
+
+4.  **Using Iterable API:**
+
+    ```typescript
+    // Iterate over all store entries
+    for (const [key, value] of store) {
+      console.log(`${key}: ${JSON.stringify(value)}`);
+    }
+
+    // Convert to array of entries using spread operator
+    const entries = [...store];
+    console.log(entries); // [[key1, value1], [key2, value2], ...]
+    ```
+
+5.  **Renderer Process Support:**
+
+    ```typescript
+    // In main process
+    import SimpleStore from './path/to/stand_alone_version/index';
+    import { app } from 'electron';
+
+    app.whenReady().then(() => {
+      // Initialize renderer support before creating BrowserWindow
+      SimpleStore.initRenderer();
+      
+      // Create your BrowserWindow and load your app
+      // ...
+    });
+
+    // Clean up when app is quitting
+    app.on('will-quit', () => {
+      SimpleStore.cleanupMain();
+    });
+
+    // In renderer process, use SimpleStore normally
+    // No need for IPC code - it's handled automatically!
+    ```
+
+6.  **Opening Store in Editor:**
+
+    ```typescript
+    // Open the store file in the default editor
+    await store.openInEditor();
     ```
 
 ## File Structure
