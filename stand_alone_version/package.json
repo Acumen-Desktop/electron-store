@@ -1,0 +1,20 @@
+{
+  "name": "simple-electron-store-standalone",
+  "version": "1.0.0",
+  "description": "A simplified, dependency-free version of electron-store.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "electron",
+    "store",
+    "config",
+    "settings",
+    "persist",
+    "standalone"
+  ],
+  "scripts": {
+    "test": "tsx --test __tests__/*.test.ts"
+  }
+}
