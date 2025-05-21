@@ -58,7 +58,8 @@ export function cleanupStoreFiles(storeName = 'config.json') {
   // Recursively remove all files and subdirectories in the mock directory
   function removeAll(dir: string) {
     if (!fs.existsSync(dir)) return;
-    for (const entry of fs.readdirSync(dir)) {
+    try {
+      for (const entry of fs.readdirSync(dir)) {
       const fullPath = path.join(dir, entry);
       try {
         const stat = fs.lstatSync(fullPath);
@@ -77,6 +78,10 @@ export function cleanupStoreFiles(storeName = 'config.json') {
       } catch (err) {
         console.warn('[cleanupStoreFiles] Failed to remove', fullPath, err);
       }
+    }
+    } catch (err) {
+      // Directory might have been deleted during iteration
+      if (err.code !== 'ENOENT') throw err;
     }
   }
   if (fs.existsSync(mockUserDataPath)) {

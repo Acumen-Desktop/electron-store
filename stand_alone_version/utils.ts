@@ -56,10 +56,10 @@ export function setProperty<T extends Record<string, any>>(
   if (typeof propertyPath !== 'string') {
     throw new TypeError('Expected propertyPath to be a string');
   }
-
   const pathParts = propertyPath.split('.');
-  let current: any = object;
-
+  // Deep clone the object to avoid mutation
+  const result: any = JSON.parse(JSON.stringify(object));
+  let current: any = result;
   for (let i = 0; i < pathParts.length; i++) {
     const part = pathParts[i];
     if (i === pathParts.length - 1) {
@@ -71,7 +71,7 @@ export function setProperty<T extends Record<string, any>>(
       current = current[part];
     }
   }
-  return object;
+  return result as T;
 }
 
 /**
@@ -84,45 +84,76 @@ export function hasProperty<T extends Record<string, any>>(
   if (typeof propertyPath !== 'string') {
     throw new TypeError('Expected propertyPath to be a string');
   }
-
   const pathParts = propertyPath.split('.');
   let current: any = object;
-
-  for (const part of pathParts) {
+  
+  // For a top-level property with no dots, do a direct check
+  if (pathParts.length === 1) {
+    return Object.prototype.hasOwnProperty.call(object, propertyPath);
+  }
+  
+  // For a nested property with dots
+  for (let i = 0; i < pathParts.length; i++) {
+    const part = pathParts[i];
     if (current === null || typeof current !== 'object' || !Object.prototype.hasOwnProperty.call(current, part)) {
       return false;
     }
     current = current[part];
   }
-  return true;
+  
+  // If we've traversed all parts and reached here, the property exists
+  return current !== undefined;
 }
 
 /**
  * Deletes a nested property from an object using a dot-notation path.
+ * Returns [newObject, wasDeleted]
  */
 export function deleteProperty<T extends Record<string, any>>(
   object: T,
   propertyPath: string,
-): boolean {
+): [T, boolean] {
   if (typeof propertyPath !== 'string') {
     throw new TypeError('Expected propertyPath to be a string');
   }
-
+  
+  // Deep clone the object to avoid mutating the original
+  const result: any = JSON.parse(JSON.stringify(object));
   const pathParts = propertyPath.split('.');
-  let current: any = object;
-
-  for (let i = 0; i < pathParts.length; i++) {
+  
+  // Simple case: top-level property (no dots)
+  if (pathParts.length === 1) {
+    const existed = Object.prototype.hasOwnProperty.call(result, pathParts[0]);
+    delete result[pathParts[0]];
+    return [result as T, existed];
+  }
+  
+  // For nested properties, we need to traverse the object
+  let current = result;
+  const lastIdx = pathParts.length - 1;
+  
+  // Traverse to the parent object of the property to delete
+  for (let i = 0; i < lastIdx; i++) {
     const part = pathParts[i];
-    if (current === null || typeof current !== 'object' || !Object.prototype.hasOwnProperty.call(current, part)) {
-      return false; // Property doesn't exist
+    
+    // If any part of the path doesn't exist, we can't delete anything
+    if (current[part] === undefined || current[part] === null || typeof current[part] !== 'object') {
+      return [result as T, false];
     }
-    if (i === pathParts.length - 1) {
-      delete current[part];
-      return true;
-    }
+    
     current = current[part];
   }
-  return false; // Should not be reached if path is valid
+  
+  // Once we've reached the parent, delete the target property
+  const lastPart = pathParts[lastIdx];
+  const exists = Object.prototype.hasOwnProperty.call(current, lastPart);
+  
+  if (exists) {
+    delete current[lastPart];
+    return [result as T, true];
+  }
+  
+  return [result as T, false];
 }
 
 /**

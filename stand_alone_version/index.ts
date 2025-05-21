@@ -32,6 +32,7 @@ export default class SimpleStore<T extends StoreData = Record<string, any>> {
   private readonly options: SimpleStoreOptions<T>;
   private readonly onDidChangeListeners = new Map<string, Array<OnDidChangeCallback<any>>>();
   private readonly onDidAnyChangeListeners: Array<OnDidAnyChangeCallback<T>> = [];
+  private _store: T = {} as T; // Add internal store property
 
   constructor(options: SimpleStoreOptions<T> = {}) {
     this.options = { ...options };
@@ -39,19 +40,79 @@ export default class SimpleStore<T extends StoreData = Record<string, any>> {
     let baseDir = app?.getPath('userData') || path.join(homedir(), `.${projectName}`);
     if (options.cwd) baseDir = options.cwd;
     this.path = path.resolve(baseDir, `${projectName}.json`);
-    // Write defaults if provided
-    if (options.defaults && Object.keys(options.defaults).length > 0) {
-      this.store = { ...options.defaults, ...this.store };
+    
+    // Initialize the store by merging defaults with disk data
+    this.initializeStore();
+  }
+  
+  /**
+   * Initialize the store by reading from disk and applying defaults
+   * This ensures the store starts with the correct initial state
+   */
+  private initializeStore(): void {
+    // Read from disk first
+    let diskData: T;
+    let fileExists = false;
+    
+    try {
+      // Check if store file exists
+      if (fs.existsSync(this.path)) {
+        fileExists = true;
+        const fileContent = fs.readFileSync(this.path, 'utf8');
+        diskData = JSON.parse(fileContent) as T;
+      } else {
+        diskData = {} as T;
+      }
+    } catch (error) {
+      // File is corrupted or unreadable
+      diskData = {} as T;
+    }
+    
+    // If we have defaults, merge them with the disk data
+    if (this.options.defaults && Object.keys(this.options.defaults).length > 0) {
+      // Start with defaults
+      const mergedData = JSON.parse(JSON.stringify(this.options.defaults)) as T;
+      
+      // Override with disk data if it exists
+      if (fileExists && diskData && typeof diskData === 'object') {
+        for (const key in diskData) {
+          if (Object.prototype.hasOwnProperty.call(diskData, key)) {
+            (mergedData as any)[key] = diskData[key];
+          }
+        }
+      }
+      
+      // Write the merged data to disk
+      try {
+        fs.mkdirSync(path.dirname(this.path), { recursive: true });
+        atomicWriteFileSync(this.path, JSON.stringify(mergedData, null, '\t'));
+      } catch (error) {
+        // Handle error silently
+      }
+      
+      // Use the merged data as our initial store
+      this._store = mergedData;
+    } else if (fileExists) {
+      // No defaults, but file exists - use the disk data
+      this._store = diskData;
+    } else {
+      // No defaults and no file - start with empty object
+      this._store = {} as T;
+      try {
+        fs.mkdirSync(path.dirname(this.path), { recursive: true });
+        atomicWriteFileSync(this.path, JSON.stringify({}, null, '\t'));
+      } catch {}
     }
   }
 
   get store(): T {
-    let parsed: T;
     try {
       const fileContent = fs.readFileSync(this.path, 'utf8');
-      parsed = JSON.parse(fileContent) as T;
+      const parsed = JSON.parse(fileContent) as T;
+      this._store = parsed; // Update internal store with disk contents
+
       console.log('[SimpleStore:store getter] Read from disk:', JSON.stringify(parsed));
-      return parsed;
+      return this._store;
     } catch (error: any) {
       // File not found or corrupted: fallback to defaults or empty
       const initial = (this.options.defaults ? { ...this.options.defaults } : {}) as T;
@@ -60,23 +121,8 @@ export default class SimpleStore<T extends StoreData = Record<string, any>> {
         atomicWriteFileSync(this.path, JSON.stringify(initial, null, '\t'));
         console.log('[SimpleStore:store getter] File missing/corrupt. Wrote defaults:', JSON.stringify(initial));
       } catch {}
-      return initial;
-    }
-  
-    try {
-      const fileContent = fs.readFileSync(this.path, 'utf8');
-      const parsed = JSON.parse(fileContent) as T;
-      // console.log('[SimpleStore:get] Read from', this.path, 'value:', parsed);
-      return parsed;
-    } catch (error: any) {
-      // File not found or corrupted: fallback to defaults or empty
-      const initial = (this.options.defaults ? { ...this.options.defaults } : {}) as T;
-      try {
-        fs.mkdirSync(path.dirname(this.path), { recursive: true });
-        atomicWriteFileSync(this.path, JSON.stringify(initial, null, '\t'));
-        // console.log('[SimpleStore:get] File missing/corrupt. Wrote defaults to', this.path, 'value:', initial);
-      } catch {}
-      return initial;
+      this._store = initial; // Update internal store with defaults
+      return this._store;
     }
   }
   set store(value: T) {
@@ -84,7 +130,8 @@ export default class SimpleStore<T extends StoreData = Record<string, any>> {
     try {
       fs.mkdirSync(path.dirname(this.path), { recursive: true });
       atomicWriteFileSync(this.path, JSON.stringify(value, null, '\t'));
-      // console.log('[SimpleStore:set] Wrote to', this.path, 'value:', value);
+      // Update internal store after successful write
+      this._store = value;
     } catch (e) {
       // console.log('[SimpleStore:set] Error writing to', this.path, e);
     }
@@ -94,24 +141,83 @@ export default class SimpleStore<T extends StoreData = Record<string, any>> {
   get<Key extends keyof T>(key: Key): T[Key] | undefined;
   get<Key extends keyof T>(key: Key, defaultValue: Required<T>[Key]): Required<T>[Key];
   get<Key extends keyof T>(key: Key, defaultValue?: T[Key]): T[Key] | undefined {
-  console.log('[SimpleStore:get] Store before get:', JSON.stringify(this.store));
-    const currentValue = this.store;
-    return getProperty(currentValue, key as string, defaultValue);
+    console.log('[SimpleStore:get] Store before get:', JSON.stringify(this._store));
+    
+    // For best performance, first check the in-memory cache
+    if (Object.keys(this._store).length > 0) {
+      const valueFromCache = getProperty(this._store, key as string, undefined);
+      
+      // If the value exists in cache, return it
+      if (valueFromCache !== undefined) {
+        return valueFromCache;
+      }
+    }
+    
+    // If not in cache or cache is empty, read from disk
+    try {
+      const fileContent = fs.readFileSync(this.path, 'utf8');
+      const fromDisk = JSON.parse(fileContent) as T;
+      
+      // Update the cache with the latest from disk
+      this._store = fromDisk;
+      
+      // Get the value from the disk data
+      return getProperty(fromDisk, key as string, defaultValue);
+    } catch (error) {
+      // If any error occurs, return the default value
+      return defaultValue;
+    }
   }
 
   set<Key extends keyof T>(key: Key, value: T[Key]): void;
   set(object: Partial<T>): void;
   set<Key extends keyof T>(keyOrObject: Key | Partial<T>, value?: T[Key]): void {
-    // Always operate on a single fresh instance of the store
-    const storeInstance = this.store;
-    const oldStore = JSON.parse(JSON.stringify(storeInstance)); // deep clone for change detection
+    // Always get the latest store data from disk first
+    const latestStore = this.store;
+    
+    // Keep a copy of the original store for change detection
+    const oldStore = JSON.parse(JSON.stringify(latestStore));
+    
+    // Create an updated version of the store
     let updated: T;
+    
     if (typeof keyOrObject === 'string') {
-      updated = setProperty(storeInstance, keyOrObject as string, value);
+      // When using dot notation keys (e.g., 'user.name')
+      const path = keyOrObject as string;
+      
+      if (path.includes('.')) {
+        // For nested properties, use the setProperty utility
+        updated = setProperty(latestStore, path, value);
+      } else {
+        // For top-level properties, direct assignment is more reliable
+        updated = { ...latestStore };
+        (updated as any)[path] = value;
+      }
     } else {
-      updated = { ...storeInstance, ...(keyOrObject as Partial<T>) };
+      // For object updates, merge with the current store
+      updated = { ...latestStore };
+      
+      // Apply each property from the object
+      const updateObj = keyOrObject as Partial<T>;
+      for (const key in updateObj) {
+        if (Object.prototype.hasOwnProperty.call(updateObj, key)) {
+          (updated as any)[key] = updateObj[key];
+        }
+      }
     }
-    this.store = updated;
+    
+    // Write the updated data to disk and update internal state
+    this._store = updated; // Update in-memory cache first
+    
+    // Force synchronous write to disk
+    try {
+      fs.mkdirSync(path.dirname(this.path), { recursive: true });
+      atomicWriteFileSync(this.path, JSON.stringify(updated, null, '\t'));
+    } catch (e) {
+      console.error('Error updating store:', e);
+    }
+    
+    // Notify listeners of changes
     this._handlePossibleChange(oldStore);
   }
 
@@ -121,30 +227,87 @@ export default class SimpleStore<T extends StoreData = Record<string, any>> {
     return result;
   }
 
-  delete<Key extends keyof T>(key: Key): void {
-    const storeInstance = this.store;
+  delete<Key extends keyof T>(key: Key): boolean {
+    // Get a fresh copy of the store
+    const storeInstance = JSON.parse(JSON.stringify(this.store)); // deep clone for safe mutation
     const oldStore = JSON.parse(JSON.stringify(storeInstance)); // deep clone for change detection
-    const newStore = deleteProperty(storeInstance, key as string);
+    
+    // Check if the property exists using the key path
+    if (!hasProperty(storeInstance, key as string)) {
+      return false;
+    }
+    
+    // Delete the property and update the store
+    const [newStore, deleted] = deleteProperty(storeInstance, key as string);
     this.store = newStore;
     this._handlePossibleChange(oldStore);
+    return true; // If we got here and the property existed, the deletion was successful
   }
 
   clear(): void {
-    const oldStore = { ...this.store };
-    this.store = {} as T;
+    // Keep a reference to the old store for change detection
+    const oldStore = JSON.parse(JSON.stringify(this.store));
+    
+    // Create a completely empty object
+    const emptyStore = {} as T;
+    
+    // Write the empty object to disk using the store setter
+    this.store = emptyStore;
+    
+    // Force a sync from disk to ensure the changes are reflected everywhere
+    // This also helps clear any caching issues
+    setTimeout(() => {
+      try {
+        // Make sure the file actually exists and is empty
+        const exists = fs.existsSync(this.path);
+        if (exists) {
+          const content = fs.readFileSync(this.path, 'utf8');
+          const parsed = JSON.parse(content);
+          if (Object.keys(parsed).length > 0) {
+            // If somehow not empty, force it to be empty
+            atomicWriteFileSync(this.path, JSON.stringify({}, null, '\t'));
+          }
+        }
+      } catch (e) {
+        // If error, try once more to write empty object
+        try {
+          atomicWriteFileSync(this.path, JSON.stringify({}, null, '\t'));
+        } catch {}
+      }
+    }, 0);
+    
+    // Notify listeners of change
     this._handlePossibleChange(oldStore);
   }
 
   private _handlePossibleChange(oldStore: T): void {
-    const newStore = this.store;
-    if (!isDeepStrictEqual(oldStore, newStore)) {
+    // Get a fresh copy of the store directly from disk to ensure we have the latest data
+    const freshStore = {
+      ...this._store // Start with our cached copy
+    };
+    
+    try {
+      // Read the latest data from disk in case it was modified elsewhere
+      const fileContent = fs.readFileSync(this.path, 'utf8');
+      const parsed = JSON.parse(fileContent) as T;
+      // Use the disk data as our source of truth
+      Object.assign(freshStore, parsed);
+    } catch {
+      // If reading fails, just use what we have in memory
+    }
+    
+    // Check for changes to any properties in the store
+    if (!isDeepStrictEqual(oldStore, freshStore)) {
       for (const listener of this.onDidAnyChangeListeners) {
-        listener(newStore, oldStore);
+        listener(freshStore, oldStore);
       }
     }
-    for (const [key, listeners] of this.onDidChangeListeners) {
+    
+    // Check for specific key changes
+    for (const [key, listeners] of this.onDidChangeListeners.entries()) {
       const oldValue = getProperty(oldStore, key);
-      const newValue = getProperty(newStore, key);
+      const newValue = getProperty(freshStore, key);
+      
       if (!isDeepStrictEqual(oldValue, newValue)) {
         for (const listener of listeners) {
           listener(newValue, oldValue);
